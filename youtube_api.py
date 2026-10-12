@@ -103,14 +103,15 @@ class YouTubeAPI:
         if self._prefer_piped and self._prefer_piped in pool:
             pool.remove(self._prefer_piped)
             pool.insert(0, self._prefer_piped)
-        return pool
+        # Cap concurrent probes for Vercel connection limits
+        return pool[:8]
 
     def _inv_order(self) -> List[str]:
         pool = list(INVIDIOUS_POOL)
         if self._prefer_inv and self._prefer_inv in pool:
             pool.remove(self._prefer_inv)
             pool.insert(0, self._prefer_inv)
-        return pool
+        return pool[:6]
 
     # ── public streams ────────────────────────────────────
     async def get_streams(self, video_id: str) -> dict:
@@ -147,56 +148,76 @@ class YouTubeAPI:
 
     async def _race_piped(self, vid: str, timeout: float = 14.0) -> Optional[dict]:
         async def one(base: str) -> Optional[dict]:
-            j = await self._get_json(f"{base}/streams/{vid}", timeout=timeout)
-            if not isinstance(j, dict) or not j.get("title"):
+            try:
+                j = await self._get_json(f"{base}/streams/{vid}", timeout=timeout)
+                if not isinstance(j, dict) or not j.get("title"):
+                    return None
+                if not (j.get("videoStreams") or j.get("audioStreams")):
+                    return None
+                return (base, self._norm_piped(j, vid, base))
+            except Exception:
                 return None
-            if not (j.get("videoStreams") or j.get("audioStreams")):
-                return None
-            self._prefer_piped = base
-            return self._norm_piped(j, vid, base)
 
         bases = self._piped_order()
         tasks = [asyncio.create_task(one(b)) for b in bases]
         try:
-            for fut in asyncio.as_completed(tasks):
-                try:
-                    res = await fut
-                except Exception:
-                    continue
-                if res:
-                    for t in tasks:
-                        if not t.done():
-                            t.cancel()
-                    return res
+            while tasks:
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                tasks = list(pending)
+                for fut in done:
+                    try:
+                        res = fut.result()
+                    except Exception:
+                        res = None
+                    if res:
+                        base, data = res
+                        self._prefer_piped = base
+                        for p in pending:
+                            p.cancel()
+                        return data
         except Exception:
             pass
+        finally:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
         return None
 
     async def _race_invidious(self, vid: str) -> Optional[dict]:
         async def one(base: str) -> Optional[dict]:
-            j = await self._get_json(f"{base}/api/v1/videos/{vid}", timeout=14.0)
-            if not isinstance(j, dict) or not j.get("title"):
+            try:
+                j = await self._get_json(f"{base}/api/v1/videos/{vid}", timeout=14.0)
+                if not isinstance(j, dict) or not j.get("title"):
+                    return None
+                formats = (j.get("formatStreams") or []) + (j.get("adaptiveFormats") or [])
+                if not formats:
+                    return None
+                return (base, self._norm_invidious(j, vid, base))
+            except Exception:
                 return None
-            formats = (j.get("formatStreams") or []) + (j.get("adaptiveFormats") or [])
-            if not formats:
-                return None
-            self._prefer_inv = base
-            return self._norm_invidious(j, vid, base)
 
         tasks = [asyncio.create_task(one(b)) for b in self._inv_order()]
         try:
-            for fut in asyncio.as_completed(tasks):
-                try:
-                    res = await fut
-                except Exception:
-                    continue
-                if res:
-                    for t in tasks:
-                        if not t.done():
-                            t.cancel()
-                    return res
+            while tasks:
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                tasks = list(pending)
+                for fut in done:
+                    try:
+                        res = fut.result()
+                    except Exception:
+                        res = None
+                    if res:
+                        base, data = res
+                        self._prefer_inv = base
+                        for p in pending:
+                            p.cancel()
+                        return data
         except Exception:
             pass
+        finally:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
         return None
 
     def _h(self, q) -> int:
