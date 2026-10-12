@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 import httpx
 
 from cookie_manager import CookieManager
-from youtube_api import YouTubeAPI, PIPED, UA
+from youtube_api import YouTubeAPI
 
 try:
     from ytmusicapi import YTMusic
