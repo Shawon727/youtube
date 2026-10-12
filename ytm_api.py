@@ -28,12 +28,15 @@ class YouTubeMusicAPI:
     def __init__(self) -> None:
         self.cookies = CookieManager()
         self._ytm: Any = None
+        self._ytm_ready = False
         self._yt = YouTubeAPI()
-        self._init()
 
     def _init(self) -> None:
+        if self._ytm_ready and self._ytm is not None:
+            return
+        self._ytm = None
         if not YTMusic:
-            self._ytm = None
+            self._ytm_ready = True
             return
         path = self.cookies.path()
         try:
@@ -43,11 +46,15 @@ class YouTubeMusicAPI:
                 self._ytm = YTMusic()
             except Exception:
                 self._ytm = None
+        self._ytm_ready = True
 
     def reload_cookies(self) -> None:
+        self._ytm = None
+        self._ytm_ready = False
         self._init()
 
     def _c(self):
+        self._init()
         if not self._ytm:
             raise RuntimeError("ytmusicapi not available")
         return self._ytm
