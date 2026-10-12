@@ -113,43 +113,262 @@ class YouTubeAPI:
             pool.insert(0, self._prefer_inv)
         return pool[:6]
 
+
+    async def _streams_innertube(self, vid: str) -> Optional[dict]:
+        """InnerTube ANDROID / ANDROID_VR — direct googlevideo URLs (no signature JS)."""
+        clients = [
+            {
+                "label": "ANDROID",
+                "key": "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w",
+                "ua": "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip",
+                "cn": "3",
+                "client": {
+                    "clientName": "ANDROID",
+                    "clientVersion": "20.10.38",
+                    "androidSdkVersion": 34,
+                    "hl": "en",
+                    "gl": "US",
+                    "userAgent": "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip",
+                },
+            },
+            {
+                "label": "ANDROID_VR",
+                "key": "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w",
+                "ua": "com.google.android.apps.youtube.vr.oculus/1.62.27 (Linux; U; Android 12) gzip",
+                "cn": "28",
+                "client": {
+                    "clientName": "ANDROID_VR",
+                    "clientVersion": "1.62.27",
+                    "deviceMake": "Oculus",
+                    "deviceModel": "Quest 3",
+                    "androidSdkVersion": 32,
+                    "hl": "en",
+                    "gl": "US",
+                },
+            },
+        ]
+        cookie = ""
+        try:
+            p = self.cookies.path()
+            if p and p.exists():
+                parts = []
+                for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    cols = line.split("\t")
+                    if len(cols) >= 7 and ("youtube" in cols[0] or cols[0].endswith("google.com")):
+                        parts.append(f"{cols[5]}={cols[6]}")
+                cookie = "; ".join(dict.fromkeys(parts))
+        except Exception:
+            cookie = ""
+
+        for c in clients:
+            body = {
+                "context": {"client": c["client"]},
+                "videoId": vid,
+                "contentCheckOk": True,
+                "racyCheckOk": True,
+                "playbackContext": {
+                    "contentPlaybackContext": {"html5Preference": "HTML5_PREF_WANTS"}
+                },
+            }
+            headers = {
+                "User-Agent": c["ua"],
+                "Content-Type": "application/json",
+                "X-YouTube-Client-Name": c["cn"],
+                "X-YouTube-Client-Version": c["client"]["clientVersion"],
+                "Origin": "https://www.youtube.com",
+            }
+            if cookie:
+                headers["Cookie"] = cookie
+            url = (
+                f"https://www.youtube.com/youtubei/v1/player"
+                f"?key={c['key']}&prettyPrint=false"
+            )
+            try:
+                async with self._client(18.0) as client:
+                    r = await client.post(url, json=body, headers=headers)
+                    if r.status_code >= 400:
+                        continue
+                    data = r.json()
+            except Exception:
+                continue
+            status = (data.get("playabilityStatus") or {}).get("status")
+            if status != "OK":
+                continue
+            sf = data.get("streamingData") or {}
+            formats = (sf.get("formats") or []) + (sf.get("adaptiveFormats") or [])
+            with_url = [f for f in formats if f.get("url")]
+            if not with_url:
+                continue
+            # Normalize to our schema
+            details = data.get("videoDetails") or {}
+            video_streams, audio_streams, muxed = [], [], []
+            for f in with_url:
+                mime = f.get("mimeType") or ""
+                height = f.get("height") or 0
+                item = {
+                    "url": f["url"],
+                    "itag": f.get("itag"),
+                    "mimeType": mime,
+                    "quality": f.get("qualityLabel") or (f"{height}p" if height else None),
+                    "height": height,
+                    "bitrate": f.get("bitrate"),
+                    "codec": (mime.split("codecs=")[-1].strip('"') if "codecs=" in mime else None),
+                    "container": mime.split(";")[0].split("/")[-1] if mime else None,
+                    "has_audio": "audio" in mime,
+                    "has_video": "video" in mime,
+                    "cdn": "googlevideo",
+                }
+                if "video" in mime and "audio" in mime:
+                    muxed.append(item)
+                elif "video" in mime:
+                    video_streams.append(item)
+                elif "audio" in mime:
+                    audio_streams.append(item)
+            video_streams.sort(key=lambda x: x.get("height") or 0, reverse=True)
+            audio_streams.sort(key=lambda x: x.get("bitrate") or 0, reverse=True)
+            muxed.sort(key=lambda x: x.get("height") or 0, reverse=True)
+            best_a = audio_streams[0] if audio_streams else None
+            qualities = []
+            for m in muxed:
+                qualities.append({
+                    "label": m.get("quality") or f"{m.get('height')}p",
+                    "height": m.get("height"),
+                    "kind": "muxed",
+                    "url": m["url"],
+                    "video_url": m["url"],
+                    "audio_url": None,
+                    "has_audio": True,
+                    "play_mode": "single",
+                })
+            for v in video_streams:
+                if not best_a:
+                    break
+                qualities.append({
+                    "label": v.get("quality") or f"{v.get('height')}p",
+                    "height": v.get("height"),
+                    "kind": "paired",
+                    "url": None,
+                    "video_url": v["url"],
+                    "audio_url": best_a["url"],
+                    "has_audio": True,
+                    "play_mode": "dual",
+                })
+            qualities.sort(key=lambda x: x.get("height") or 0, reverse=True)
+            direct_video = (muxed[0]["url"] if muxed else None) or (
+                video_streams[0]["url"] if video_streams else None
+            )
+            direct_audio = best_a["url"] if best_a else None
+            thumbs = details.get("thumbnail", {}).get("thumbnails") or []
+            thumb = thumbs[-1]["url"] if thumbs else f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+            return {
+                "videoId": vid,
+                "title": details.get("title") or "",
+                "description": (details.get("shortDescription") or "")[:2000],
+                "thumbnail": thumb,
+                "duration": int(details.get("lengthSeconds") or 0),
+                "uploader": details.get("author") or "",
+                "uploaderId": details.get("channelId") or "",
+                "uploaderUrl": "",
+                "views": int(details.get("viewCount") or 0),
+                "likes": 0,
+                "uploadDate": "",
+                "liveNow": bool(details.get("isLive") or details.get("isLiveContent")),
+                "hls": sf.get("hlsManifestUrl"),
+                "dash": sf.get("dashManifestUrl"),
+                "videoStreams": video_streams,
+                "audioStreams": audio_streams,
+                "muxedStreams": muxed,
+                "qualities": qualities,
+                "default_quality": qualities[0] if qualities else None,
+                "direct_video": direct_video,
+                "direct_audio": direct_audio,
+                "direct_play": direct_video or direct_audio,
+                "mp4": direct_video,
+                "mp3_audio": direct_audio,
+                "provider": "innertube",
+                "instance": c["label"],
+                "webpage_url": f"https://www.youtube.com/watch?v={vid}",
+            }
+        return None
+
     # ── public streams ────────────────────────────────────
     async def get_streams(self, video_id: str) -> dict:
         vid = extract_id(video_id)
         errors: List[str] = []
+        bot_blocked = False
 
-        # Round 1: parallel Piped (fast)
-        data = await self._race_piped(vid)
+        # Round 1: InnerTube ANDROID (direct googlevideo CDN — best)
+        data = await self._streams_innertube(vid)
         if data:
             return data
-        errors.append("piped-round1")
+        errors.append("innertube")
 
-        # Round 2: parallel Invidious
+        # Round 2: parallel Piped
+        data, piped_bot = await self._race_piped(vid)
+        if data:
+            return data
+        errors.append("piped")
+        bot_blocked = bot_blocked or piped_bot
+
+        # Round 3: parallel Invidious
         data = await self._race_invidious(vid)
         if data:
             return data
         errors.append("invidious")
 
-        # Round 3: Piped again with longer timeout (cold starts)
-        data = await self._race_piped(vid, timeout=20.0)
-        if data:
-            return data
-        errors.append("piped-round2")
-
-        # Round 4: yt-dlp
+        # Round 4: yt-dlp with cookies
         data = await self._streams_ytdlp(vid)
         if data:
             return data
         errors.append("yt-dlp")
 
+        title = await self._oembed_title(vid)
+        if bot_blocked:
+            raise RuntimeError(
+                f"YouTube requires sign-in for this video"
+                + (f" ({title})" if title else "")
+                + ". Upload fresh youtube.com cookies at /cookies and retry."
+            )
         raise RuntimeError(
-            "All stream backends failed after retries (" + ", ".join(errors) + "). Try again in a few seconds."
+            "All stream backends failed ("
+            + ", ".join(errors)
+            + "). Try again, or upload cookies at /cookies."
         )
 
-    async def _race_piped(self, vid: str, timeout: float = 14.0) -> Optional[dict]:
-        async def one(base: str) -> Optional[dict]:
+    async def _oembed_title(self, vid: str) -> str:
+        try:
+            async with self._client(8) as c:
+                r = await c.get(
+                    "https://www.youtube.com/oembed",
+                    params={"url": f"https://www.youtube.com/watch?v={vid}", "format": "json"},
+                )
+                if r.status_code < 400:
+                    return (r.json() or {}).get("title") or ""
+        except Exception:
+            pass
+        return ""
+
+    async def _race_piped(self, vid: str, timeout: float = 14.0):
+        """Returns (data|None, bot_blocked: bool)."""
+        bot_hit = False
+
+        async def one(base: str):
+            nonlocal bot_hit
             try:
-                j = await self._get_json(f"{base}/streams/{vid}", timeout=timeout)
+                async with self._client(timeout) as c:
+                    r = await c.get(f"{base}/streams/{vid}")
+                    text = r.text or ""
+                    if "LOGIN_REQUIRED" in text or "SignInConfirmNotBot" in text or "Sign in to confirm" in text:
+                        bot_hit = True
+                        return None
+                    if r.status_code >= 400:
+                        return None
+                    if not text[:1] in ("{", "["):
+                        return None
+                    j = r.json()
                 if not isinstance(j, dict) or not j.get("title"):
                     return None
                 if not (j.get("videoStreams") or j.get("audioStreams")):
@@ -174,14 +393,14 @@ class YouTubeAPI:
                         self._prefer_piped = base
                         for p in pending:
                             p.cancel()
-                        return data
+                        return data, False
         except Exception:
             pass
         finally:
             for t in tasks:
                 if not t.done():
                     t.cancel()
-        return None
+        return None, bot_hit
 
     async def _race_invidious(self, vid: str) -> Optional[dict]:
         async def one(base: str) -> Optional[dict]:
@@ -403,9 +622,14 @@ class YouTubeAPI:
             "no_warnings": True,
             "skip_download": True,
             "socket_timeout": 25,
-            "retries": 2,
+            "retries": 3,
             "ignore_no_formats_error": True,
-            "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
+            # android often returns direct URLs without signature JS
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "android_vr", "ios", "mweb"],
+                }
+            },
         }
         p = self.cookies.path()
         if p:
