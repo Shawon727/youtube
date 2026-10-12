@@ -1,18 +1,19 @@
-"""YouTube Music — SimpMusic style (ytmusicapi) + yt-dlp for direct audio CDN."""
+"""YouTube Music — ytmusicapi meta + Piped/yt-dlp streams."""
 from __future__ import annotations
-import asyncio, re
-from typing import Any, Dict, List, Optional
+
+import asyncio
+import re
+from typing import Any, Dict, Optional
+
+import httpx
+
 from cookie_manager import CookieManager
+from youtube_api import YouTubeAPI, PIPED, UA
 
 try:
     from ytmusicapi import YTMusic
 except ImportError:
     YTMusic = None  # type: ignore
-
-try:
-    import yt_dlp
-except ImportError:
-    yt_dlp = None  # type: ignore
 
 
 def extract_id(raw: str) -> str:
@@ -27,6 +28,7 @@ class YouTubeMusicAPI:
     def __init__(self) -> None:
         self.cookies = CookieManager()
         self._ytm: Any = None
+        self._yt = YouTubeAPI()
         self._init()
 
     def _init(self) -> None:
@@ -76,8 +78,7 @@ class YouTubeMusicAPI:
         def _do():
             return client.get_search_suggestions(q) or []
 
-        s = await self._run(_do)
-        return {"query": q, "suggestions": s}
+        return {"query": q, "suggestions": await self._run(_do)}
 
     async def home(self, limit: int = 6) -> dict:
         client = self._c()
@@ -130,9 +131,7 @@ class YouTubeMusicAPI:
 
         return await self._run(_do)
 
-    async def get_watch_playlist(
-        self, video_id: str, playlist_id: Optional[str] = None, radio: bool = True
-    ) -> dict:
+    async def get_watch_playlist(self, video_id: str, playlist_id: Optional[str] = None, radio: bool = True) -> dict:
         client = self._c()
         vid = extract_id(video_id)
 
@@ -158,75 +157,39 @@ class YouTubeMusicAPI:
         except Exception as e:
             return {"lyrics": None, "error": str(e)[:150]}
 
-    # ── direct audio CDN via yt-dlp ───────────────────────
     async def play(self, video_id: str) -> dict:
-        if not yt_dlp:
-            raise RuntimeError("yt-dlp not installed")
+        """Best audio CDN URL via Piped streams (Vercel-safe)."""
         vid = extract_id(video_id)
-        cookie_path = self.cookies.path()
-        opts: Dict[str, Any] = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "format": "bestaudio/best",
-            "socket_timeout": 25,
-            "retries": 3,
-            "extractor_args": {
-                "youtube": {"player_client": ["android_music", "android", "ios", "web"]}
-            },
-        }
-        if cookie_path:
-            opts["cookiefile"] = str(cookie_path)
-
-        def _do():
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                return ydl.extract_info(
-                    f"https://music.youtube.com/watch?v={vid}", download=False
-                ) or {}
-
-        info = await self._run(_do)
-        formats = info.get("formats") or []
-        audio_formats = [
-            f for f in formats
-            if (f.get("acodec") or "none") != "none"
-            and (f.get("vcodec") or "none") == "none"
-            and f.get("url")
-        ]
-        audio_formats.sort(key=lambda x: (x.get("abr") or x.get("tbr") or 0), reverse=True)
-
-        best = audio_formats[0] if audio_formats else None
+        streams = await self._yt.get_streams(vid)
+        audio = streams.get("audioStreams") or []
+        # also accept muxed as audio source
+        direct_audio = streams.get("direct_audio")
+        if not direct_audio and audio:
+            direct_audio = audio[0].get("url")
+        if not direct_audio:
+            # last try: any stream url
+            direct_audio = streams.get("direct_play")
         alts = []
-        for f in audio_formats[:6]:
+        for a in audio[:6]:
             alts.append({
-                "url": f.get("url"),
-                "abr": f.get("abr") or f.get("tbr"),
-                "ext": f.get("ext"),
-                "codec": f.get("acodec"),
-                "format_id": f.get("format_id"),
-                "filesize": f.get("filesize") or f.get("filesize_approx"),
-                "cdn": "googlevideo" if "googlevideo.com" in (f.get("url") or "") else "other",
+                "url": a.get("url"),
+                "bitrate": a.get("bitrate"),
+                "mimeType": a.get("mimeType"),
+                "codec": a.get("codec"),
+                "container": a.get("container"),
             })
-
-        thumbs = info.get("thumbnails") or []
-        thumb = thumbs[-1]["url"] if thumbs else None
-        audio_url = best.get("url") if best else None
-
         return {
             "videoId": vid,
-            "title": info.get("title") or "",
-            "artist": info.get("artist") or info.get("uploader") or info.get("channel") or "",
-            "album": info.get("album") or "",
-            "duration": info.get("duration") or 0,
-            "thumbnail": thumb or "",
-            # main direct CDN links
-            "audio_url": audio_url,
-            "directUrl": audio_url,
-            "direct_audio": audio_url,
-            "abr": (best.get("abr") or best.get("tbr")) if best else None,
-            "ext": best.get("ext") if best else None,
-            "codec": best.get("acodec") if best else None,
+            "title": streams.get("title") or "",
+            "artist": streams.get("uploader") or "",
+            "duration": streams.get("duration") or 0,
+            "thumbnail": streams.get("thumbnail") or "",
+            "audio_url": direct_audio,
+            "directUrl": direct_audio,
+            "direct_audio": direct_audio,
+            "mp3_audio": direct_audio,
             "formats": alts,
-            "expires_note": "googlevideo URL expires ~6 hours — call /ytm/play again when needed",
-            "provider": "yt-dlp",
-            "webpage_url": info.get("webpage_url") or f"https://music.youtube.com/watch?v={vid}",
+            "expires_note": "Stream URLs expire — call again when needed",
+            "provider": streams.get("provider"),
+            "webpage_url": f"https://music.youtube.com/watch?v={vid}",
         }
