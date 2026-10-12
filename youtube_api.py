@@ -114,8 +114,59 @@ class YouTubeAPI:
         return pool[:6]
 
 
+    async def _get_visitor_data(self) -> Optional[str]:
+        """Fresh visitorData — required to avoid LOGIN_REQUIRED on many videos."""
+        try:
+            async with self._client(12.0) as c:
+                r = await c.get(
+                    "https://www.youtube.com/",
+                    headers={
+                        "User-Agent": UA,
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                )
+                text = r.text or ""
+            import re as _re
+            for pat in (
+                r'"VISITOR_DATA":"([^"]+)"',
+                r'"visitorData":"([^"]+)"',
+                r"visitorData['\"]?\s*[:=]\s*['\"]([^'\"]+)",
+            ):
+                m = _re.search(pat, text)
+                if m:
+                    return m.group(1)
+        except Exception:
+            pass
+        # Fallback: call sw.js / youtubei guide-ish endpoint
+        try:
+            async with self._client(10.0) as c:
+                body = {
+                    "context": {
+                        "client": {
+                            "clientName": "WEB",
+                            "clientVersion": "2.20241201.00.00",
+                            "hl": "en",
+                            "gl": "US",
+                        }
+                    }
+                }
+                r = await c.post(
+                    "https://www.youtube.com/youtubei/v1/visitor_id?prettyPrint=false",
+                    json=body,
+                    headers={"User-Agent": UA, "Content-Type": "application/json"},
+                )
+                if r.status_code < 400:
+                    j = r.json()
+                    v = (j.get("responseContext") or {}).get("visitorData")
+                    if v:
+                        return v
+        except Exception:
+            pass
+        return None
+
     async def _streams_innertube(self, vid: str) -> Optional[dict]:
-        """InnerTube ANDROID / ANDROID_VR — direct googlevideo URLs (no signature JS)."""
+        """InnerTube ANDROID + visitorData — bypasses most bot checks without cookies."""
+        visitor = await self._get_visitor_data()
         clients = [
             {
                 "label": "ANDROID",
@@ -147,25 +198,20 @@ class YouTubeAPI:
                 },
             },
         ]
-        cookie = ""
-        try:
-            p = self.cookies.path()
-            if p and p.exists():
-                parts = []
-                for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    cols = line.split("\t")
-                    if len(cols) >= 7 and ("youtube" in cols[0] or cols[0].endswith("google.com")):
-                        parts.append(f"{cols[5]}={cols[6]}")
-                cookie = "; ".join(dict.fromkeys(parts))
-        except Exception:
-            cookie = ""
 
+        # Try each client with visitorData first, then without
+        attempts = []
         for c in clients:
+            if visitor:
+                attempts.append((c, visitor))
+            attempts.append((c, None))
+
+        for c, vis in attempts:
+            client = dict(c["client"])
+            if vis:
+                client["visitorData"] = vis
             body = {
-                "context": {"client": c["client"]},
+                "context": {"client": client},
                 "videoId": vid,
                 "contentCheckOk": True,
                 "racyCheckOk": True,
@@ -180,15 +226,13 @@ class YouTubeAPI:
                 "X-YouTube-Client-Version": c["client"]["clientVersion"],
                 "Origin": "https://www.youtube.com",
             }
-            if cookie:
-                headers["Cookie"] = cookie
             url = (
                 f"https://www.youtube.com/youtubei/v1/player"
                 f"?key={c['key']}&prettyPrint=false"
             )
             try:
-                async with self._client(18.0) as client:
-                    r = await client.post(url, json=body, headers=headers)
+                async with self._client(18.0) as http:
+                    r = await http.post(url, json=body, headers=headers)
                     if r.status_code >= 400:
                         continue
                     data = r.json()
@@ -202,7 +246,6 @@ class YouTubeAPI:
             with_url = [f for f in formats if f.get("url")]
             if not with_url:
                 continue
-            # Normalize to our schema
             details = data.get("videoDetails") or {}
             video_streams, audio_streams, muxed = [], [], []
             for f in with_url:
@@ -232,13 +275,13 @@ class YouTubeAPI:
             muxed.sort(key=lambda x: x.get("height") or 0, reverse=True)
             best_a = audio_streams[0] if audio_streams else None
             qualities = []
-            for m in muxed:
+            for mrow in muxed:
                 qualities.append({
-                    "label": m.get("quality") or f"{m.get('height')}p",
-                    "height": m.get("height"),
+                    "label": mrow.get("quality") or f"{mrow.get('height')}p",
+                    "height": mrow.get("height"),
                     "kind": "muxed",
-                    "url": m["url"],
-                    "video_url": m["url"],
+                    "url": mrow["url"],
+                    "video_url": mrow["url"],
                     "audio_url": None,
                     "has_audio": True,
                     "play_mode": "single",
@@ -289,12 +332,11 @@ class YouTubeAPI:
                 "mp4": direct_video,
                 "mp3_audio": direct_audio,
                 "provider": "innertube",
-                "instance": c["label"],
+                "instance": c["label"] + ("+visitor" if vis else ""),
                 "webpage_url": f"https://www.youtube.com/watch?v={vid}",
             }
         return None
 
-    # ── public streams ────────────────────────────────────
     async def get_streams(self, video_id: str) -> dict:
         vid = extract_id(video_id)
         errors: List[str] = []
@@ -326,16 +368,16 @@ class YouTubeAPI:
         errors.append("yt-dlp")
 
         title = await self._oembed_title(vid)
+        label = f" ({title})" if title else ""
         if bot_blocked:
             raise RuntimeError(
-                f"YouTube requires sign-in for this video"
-                + (f" ({title})" if title else "")
-                + ". Upload fresh youtube.com cookies at /cookies and retry."
+                f"YouTube blocked anonymous access for this video{label}. "
+                "Try another video, or retry later (IP/bot check)."
             )
         raise RuntimeError(
             "All stream backends failed ("
             + ", ".join(errors)
-            + "). Try again, or upload cookies at /cookies."
+            + f"){label}. Retry in a few seconds."
         )
 
     async def _oembed_title(self, vid: str) -> str:
@@ -631,10 +673,6 @@ class YouTubeAPI:
                 }
             },
         }
-        p = self.cookies.path()
-        if p:
-            opts["cookiefile"] = str(p)
-
         def _do():
             with yt_dlp.YoutubeDL(opts) as ydl:
                 return ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False) or {}
