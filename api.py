@@ -41,7 +41,7 @@ try:
 except Exception:
     CREATOR = ""
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 _DEAD = CREATOR != "shawon" or not CREATOR
 
 
@@ -113,7 +113,6 @@ async def health():
 
 # ── YouTube ───────────────────────────────────────────────
 @app.get("/yt/streams/{video_id}")
-@app.get("/youtube/streams/{video_id}")
 async def yt_streams(video_id: str):
     _guard()
     try:
@@ -128,7 +127,6 @@ async def yt_streams(video_id: str):
 
 
 @app.get("/yt/search")
-@app.get("/youtube/search")
 async def yt_search(q: str = Query(..., min_length=1), filter: str = Query("all"), limit: int = Query(20, ge=1, le=50)):
     _guard()
     try:
@@ -138,7 +136,6 @@ async def yt_search(q: str = Query(..., min_length=1), filter: str = Query("all"
 
 
 @app.get("/yt/trending")
-@app.get("/youtube/trending")
 async def yt_trending(region: str = Query("US", min_length=2, max_length=2), category: str = Query("default")):
     _guard()
     try:
@@ -148,7 +145,6 @@ async def yt_trending(region: str = Query("US", min_length=2, max_length=2), cat
 
 
 @app.get("/yt/channel/{channel_id}")
-@app.get("/youtube/channel/{channel_id}")
 async def yt_channel(channel_id: str, limit: int = Query(20, ge=1, le=50)):
     _guard()
     try:
@@ -158,7 +154,6 @@ async def yt_channel(channel_id: str, limit: int = Query(20, ge=1, le=50)):
 
 
 @app.get("/yt/playlist/{playlist_id}")
-@app.get("/youtube/playlist/{playlist_id}")
 async def yt_playlist(playlist_id: str, limit: int = Query(50, ge=1, le=100)):
     _guard()
     try:
@@ -168,7 +163,6 @@ async def yt_playlist(playlist_id: str, limit: int = Query(50, ge=1, le=100)):
 
 
 @app.get("/yt/comments/{video_id}")
-@app.get("/youtube/comments/{video_id}")
 async def yt_comments(video_id: str, limit: int = Query(30, ge=1, le=100)):
     _guard()
     try:
@@ -178,7 +172,6 @@ async def yt_comments(video_id: str, limit: int = Query(30, ge=1, le=100)):
 
 
 @app.get("/yt/suggestions")
-@app.get("/youtube/suggestions")
 async def yt_suggestions(q: str = Query(..., min_length=1)):
     _guard()
     try:
@@ -188,7 +181,6 @@ async def yt_suggestions(q: str = Query(..., min_length=1)):
 
 
 @app.get("/yt/info")
-@app.get("/youtube/info")
 async def yt_info(url: str = Query(...)):
     _guard()
     try:
@@ -199,8 +191,6 @@ async def yt_info(url: str = Query(...)):
 
 # ── YouTube Music ─────────────────────────────────────────
 @app.get("/ytm/search")
-@app.get("/yt-music/search")
-@app.get("/music/search")
 async def ytm_search(q: str = Query(..., min_length=1), filter: str = Query("songs"), limit: int = Query(20, ge=1, le=50)):
     _guard()
     try:
@@ -210,7 +200,6 @@ async def ytm_search(q: str = Query(..., min_length=1), filter: str = Query("son
 
 
 @app.get("/ytm/home")
-@app.get("/yt-music/home")
 async def ytm_home(limit: int = Query(6, ge=1, le=12)):
     _guard()
     try:
@@ -220,7 +209,6 @@ async def ytm_home(limit: int = Query(6, ge=1, le=12)):
 
 
 @app.get("/ytm/charts")
-@app.get("/yt-music/charts")
 async def ytm_charts(country: str = Query("ZZ")):
     _guard()
     try:
@@ -230,7 +218,6 @@ async def ytm_charts(country: str = Query("ZZ")):
 
 
 @app.get("/ytm/artist/{artist_id}")
-@app.get("/yt-music/artist/{artist_id}")
 async def ytm_artist(artist_id: str):
     _guard()
     try:
@@ -240,7 +227,6 @@ async def ytm_artist(artist_id: str):
 
 
 @app.get("/ytm/album/{browse_id}")
-@app.get("/yt-music/album/{browse_id}")
 async def ytm_album(browse_id: str):
     _guard()
     try:
@@ -250,7 +236,6 @@ async def ytm_album(browse_id: str):
 
 
 @app.get("/ytm/playlist/{playlist_id}")
-@app.get("/yt-music/playlist/{playlist_id}")
 async def ytm_playlist(playlist_id: str, limit: int = Query(100, ge=1, le=200)):
     _guard()
     try:
@@ -260,8 +245,6 @@ async def ytm_playlist(playlist_id: str, limit: int = Query(100, ge=1, le=200)):
 
 
 @app.get("/ytm/play/{video_id}")
-@app.get("/yt-music/play/{video_id}")
-@app.get("/music/play/{video_id}")
 async def ytm_play(video_id: str):
     _guard()
     try:
@@ -276,7 +259,6 @@ async def ytm_play(video_id: str):
 
 
 @app.get("/ytm/next")
-@app.get("/yt-music/next")
 async def ytm_next(video_id: str = Query(...), playlist_id: Optional[str] = Query(None), radio: bool = Query(True)):
     _guard()
     try:
@@ -286,7 +268,6 @@ async def ytm_next(video_id: str = Query(...), playlist_id: Optional[str] = Quer
 
 
 @app.get("/ytm/lyrics/{video_id}")
-@app.get("/yt-music/lyrics/{video_id}")
 async def ytm_lyrics(video_id: str):
     _guard()
     try:
@@ -296,7 +277,6 @@ async def ytm_lyrics(video_id: str):
 
 
 @app.get("/ytm/suggestions")
-@app.get("/yt-music/suggestions")
 async def ytm_suggestions(q: str = Query(..., min_length=1)):
     _guard()
     try:
@@ -306,11 +286,67 @@ async def ytm_suggestions(q: str = Query(..., min_length=1)):
 
 
 @app.get("/ytm/moods")
-@app.get("/yt-music/moods")
 async def ytm_moods():
     _guard()
     try:
         return ok(await ytm.get_moods_and_genres())
+    except Exception as e:
+        raise HTTPException(502, detail=fail(str(e)))
+
+
+
+
+# ── Download helpers (direct CDN URL for clients) ─────────
+@app.get("/yt/download/{video_id}")
+async def yt_download(video_id: str, quality: str = Query("best", description="best | 1080 | 720 | 480 | 360 | audio")):
+    """Return best video or audio download URL (direct CDN)."""
+    _guard()
+    try:
+        data = await yt.get_streams(video_id)
+        q = (quality or "best").lower()
+        if q in ("audio", "mp3", "m4a"):
+            url = data.get("direct_audio") or data.get("direct_play")
+            return ok({"videoId": data.get("videoId"), "title": data.get("title"), "type": "audio", "url": url, "provider": data.get("provider")})
+        # video
+        url = data.get("direct_video") or data.get("direct_play")
+        if q.isdigit():
+            h = int(q)
+            for item in data.get("qualities") or []:
+                if (item.get("height") or 0) <= h and (item.get("url") or item.get("video_url")):
+                    url = item.get("url") or item.get("video_url")
+                    break
+        return ok({
+            "videoId": data.get("videoId"),
+            "title": data.get("title"),
+            "type": "video",
+            "url": url,
+            "direct_video": data.get("direct_video"),
+            "direct_audio": data.get("direct_audio"),
+            "provider": data.get("provider"),
+        })
+    except Exception as e:
+        raise HTTPException(502, detail=fail(str(e)))
+
+
+@app.get("/ytm/download/{video_id}")
+async def ytm_download(video_id: str):
+    """YouTube Music / audio download URL (best audio CDN)."""
+    _guard()
+    try:
+        data = await ytm.play(video_id)
+        url = data.get("audio_url") or data.get("directUrl")
+        if not url:
+            raise HTTPException(502, detail=fail("No audio URL", videoId=video_id))
+        return ok({
+            "videoId": data.get("videoId"),
+            "title": data.get("title"),
+            "artist": data.get("artist"),
+            "type": "audio",
+            "url": url,
+            "provider": data.get("provider"),
+        })
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(502, detail=fail(str(e)))
 
