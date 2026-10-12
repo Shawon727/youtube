@@ -115,226 +115,208 @@ class YouTubeAPI:
 
 
     async def _get_visitor_data(self) -> Optional[str]:
-        """Fresh visitorData — required to avoid LOGIN_REQUIRED on many videos."""
+        """Fresh visitorData from youtube.com homepage."""
         try:
             async with self._client(12.0) as c:
                 r = await c.get(
                     "https://www.youtube.com/",
-                    headers={
-                        "User-Agent": UA,
-                        "Accept-Language": "en-US,en;q=0.9",
-                    },
+                    headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"},
                 )
                 text = r.text or ""
             import re as _re
-            for pat in (
-                r'"VISITOR_DATA":"([^"]+)"',
-                r'"visitorData":"([^"]+)"',
-                r"visitorData['\"]?\s*[:=]\s*['\"]([^'\"]+)",
-            ):
+            for pat in (r'"VISITOR_DATA":"([^"]+)"', r'"visitorData":"([^"]+)"'):
                 m = _re.search(pat, text)
                 if m:
                     return m.group(1)
         except Exception:
             pass
-        # Fallback: call sw.js / youtubei guide-ish endpoint
-        try:
-            async with self._client(10.0) as c:
-                body = {
-                    "context": {
-                        "client": {
-                            "clientName": "WEB",
-                            "clientVersion": "2.20241201.00.00",
-                            "hl": "en",
-                            "gl": "US",
-                        }
-                    }
-                }
-                r = await c.post(
-                    "https://www.youtube.com/youtubei/v1/visitor_id?prettyPrint=false",
-                    json=body,
-                    headers={"User-Agent": UA, "Content-Type": "application/json"},
-                )
-                if r.status_code < 400:
-                    j = r.json()
-                    v = (j.get("responseContext") or {}).get("visitorData")
-                    if v:
-                        return v
-        except Exception:
-            pass
         return None
 
+    async def _innertube_player(
+        self, vid: str, visitor: Optional[str], gl: str = "US"
+    ) -> Optional[dict]:
+        """Single ANDROID player call. Returns raw JSON or None."""
+        ua = "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip"
+        client = {
+            "clientName": "ANDROID",
+            "clientVersion": "20.10.38",
+            "androidSdkVersion": 34,
+            "hl": "en",
+            "gl": gl,
+            "userAgent": ua,
+        }
+        if visitor:
+            client["visitorData"] = visitor
+        body = {
+            "context": {"client": client},
+            "videoId": vid,
+            "contentCheckOk": True,
+            "racyCheckOk": True,
+            "playbackContext": {
+                "contentPlaybackContext": {"html5Preference": "HTML5_PREF_WANTS"}
+            },
+        }
+        headers = {
+            "User-Agent": ua,
+            "Content-Type": "application/json",
+            "X-YouTube-Client-Name": "3",
+            "X-YouTube-Client-Version": "20.10.38",
+            "Origin": "https://www.youtube.com",
+        }
+        url = (
+            "https://www.youtube.com/youtubei/v1/player"
+            "?key=AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w&prettyPrint=false"
+        )
+        try:
+            async with self._client(18.0) as http:
+                r = await http.post(url, json=body, headers=headers)
+                if r.status_code >= 400:
+                    return None
+                return r.json()
+        except Exception:
+            return None
+
+    def _parse_innertube(self, data: dict, vid: str, instance: str) -> Optional[dict]:
+        status = (data.get("playabilityStatus") or {}).get("status")
+        if status != "OK":
+            return None
+        sf = data.get("streamingData") or {}
+        formats = (sf.get("formats") or []) + (sf.get("adaptiveFormats") or [])
+        with_url = [f for f in formats if f.get("url")]
+        if not with_url:
+            return None
+        details = data.get("videoDetails") or {}
+        video_streams, audio_streams, muxed = [], [], []
+        for f in with_url:
+            mime = f.get("mimeType") or ""
+            height = f.get("height") or 0
+            item = {
+                "url": f["url"],
+                "itag": f.get("itag"),
+                "mimeType": mime,
+                "quality": f.get("qualityLabel") or (f"{height}p" if height else None),
+                "height": height,
+                "bitrate": f.get("bitrate"),
+                "codec": (mime.split("codecs=")[-1].strip('"') if "codecs=" in mime else None),
+                "container": mime.split(";")[0].split("/")[-1] if mime else None,
+                "has_audio": "audio" in mime,
+                "has_video": "video" in mime,
+                "cdn": "googlevideo",
+            }
+            if "video" in mime and "audio" in mime:
+                muxed.append(item)
+            elif "video" in mime:
+                video_streams.append(item)
+            elif "audio" in mime:
+                audio_streams.append(item)
+        video_streams.sort(key=lambda x: x.get("height") or 0, reverse=True)
+        audio_streams.sort(key=lambda x: x.get("bitrate") or 0, reverse=True)
+        muxed.sort(key=lambda x: x.get("height") or 0, reverse=True)
+        best_a = audio_streams[0] if audio_streams else None
+        qualities = []
+        for mrow in muxed:
+            qualities.append({
+                "label": mrow.get("quality") or f"{mrow.get('height')}p",
+                "height": mrow.get("height"),
+                "kind": "muxed",
+                "url": mrow["url"],
+                "video_url": mrow["url"],
+                "audio_url": None,
+                "has_audio": True,
+                "play_mode": "single",
+            })
+        for v in video_streams:
+            if not best_a:
+                break
+            qualities.append({
+                "label": v.get("quality") or f"{v.get('height')}p",
+                "height": v.get("height"),
+                "kind": "paired",
+                "url": None,
+                "video_url": v["url"],
+                "audio_url": best_a["url"],
+                "has_audio": True,
+                "play_mode": "dual",
+            })
+        qualities.sort(key=lambda x: x.get("height") or 0, reverse=True)
+        direct_video = (muxed[0]["url"] if muxed else None) or (
+            video_streams[0]["url"] if video_streams else None
+        )
+        direct_audio = best_a["url"] if best_a else None
+        thumbs = details.get("thumbnail", {}).get("thumbnails") or []
+        thumb = thumbs[-1]["url"] if thumbs else f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+        return {
+            "videoId": vid,
+            "title": details.get("title") or "",
+            "description": (details.get("shortDescription") or "")[:2000],
+            "thumbnail": thumb,
+            "duration": int(details.get("lengthSeconds") or 0),
+            "uploader": details.get("author") or "",
+            "uploaderId": details.get("channelId") or "",
+            "uploaderUrl": "",
+            "views": int(details.get("viewCount") or 0),
+            "likes": 0,
+            "uploadDate": "",
+            "liveNow": bool(details.get("isLive") or details.get("isLiveContent")),
+            "hls": sf.get("hlsManifestUrl"),
+            "dash": sf.get("dashManifestUrl"),
+            "videoStreams": video_streams,
+            "audioStreams": audio_streams,
+            "muxedStreams": muxed,
+            "qualities": qualities,
+            "default_quality": qualities[0] if qualities else None,
+            "direct_video": direct_video,
+            "direct_audio": direct_audio,
+            "direct_play": direct_video or direct_audio,
+            "mp4": direct_video,
+            "mp3_audio": direct_audio,
+            "provider": "innertube",
+            "instance": instance,
+            "webpage_url": f"https://www.youtube.com/watch?v={vid}",
+        }
+
     async def _streams_innertube(self, vid: str) -> Optional[dict]:
-        """InnerTube ANDROID + visitorData — bypasses most bot checks without cookies."""
-        visitor = await self._get_visitor_data()
-        clients = [
-            {
-                "label": "ANDROID",
-                "key": "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w",
-                "ua": "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip",
-                "cn": "3",
-                "client": {
-                    "clientName": "ANDROID",
-                    "clientVersion": "20.10.38",
-                    "androidSdkVersion": 34,
-                    "hl": "en",
-                    "gl": "US",
-                    "userAgent": "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip",
-                },
-            },
-            {
-                "label": "ANDROID_VR",
-                "key": "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w",
-                "ua": "com.google.android.apps.youtube.vr.oculus/1.62.27 (Linux; U; Android 12) gzip",
-                "cn": "28",
-                "client": {
-                    "clientName": "ANDROID_VR",
-                    "clientVersion": "1.62.27",
-                    "deviceMake": "Oculus",
-                    "deviceModel": "Quest 3",
-                    "androidSdkVersion": 32,
-                    "hl": "en",
-                    "gl": "US",
-                },
-            },
-        ]
+        """
+        ANDROID InnerTube with visitorData bootstrap.
+        Strategy (cookie-free, beats most bot checks):
+          1) homepage visitorData
+          2) visitor from a public video (rickroll) player response
+          3) visitor from LOGIN_REQUIRED response → retry
+          4) try gl=US and gl=BD
+        """
+        visitors: List[Optional[str]] = []
+        home_v = await self._get_visitor_data()
+        if home_v:
+            visitors.append(home_v)
 
-        # Try each client with visitorData first, then without
-        attempts = []
-        for c in clients:
-            if visitor:
-                attempts.append((c, visitor))
-            attempts.append((c, None))
+        # Bootstrap visitor from a always-public video
+        boot = await self._innertube_player("dQw4w9WgXcQ", home_v, "US")
+        if isinstance(boot, dict):
+            bv = (boot.get("responseContext") or {}).get("visitorData")
+            if bv and bv not in visitors:
+                visitors.append(bv)
+            # if boot itself OK we don't need it for target
 
-        for c, vis in attempts:
-            client = dict(c["client"])
-            if vis:
-                client["visitorData"] = vis
-            body = {
-                "context": {"client": client},
-                "videoId": vid,
-                "contentCheckOk": True,
-                "racyCheckOk": True,
-                "playbackContext": {
-                    "contentPlaybackContext": {"html5Preference": "HTML5_PREF_WANTS"}
-                },
-            }
-            headers = {
-                "User-Agent": c["ua"],
-                "Content-Type": "application/json",
-                "X-YouTube-Client-Name": c["cn"],
-                "X-YouTube-Client-Version": c["client"]["clientVersion"],
-                "Origin": "https://www.youtube.com",
-            }
-            url = (
-                f"https://www.youtube.com/youtubei/v1/player"
-                f"?key={c['key']}&prettyPrint=false"
-            )
-            try:
-                async with self._client(18.0) as http:
-                    r = await http.post(url, json=body, headers=headers)
-                    if r.status_code >= 400:
-                        continue
-                    data = r.json()
-            except Exception:
-                continue
-            status = (data.get("playabilityStatus") or {}).get("status")
-            if status != "OK":
-                continue
-            sf = data.get("streamingData") or {}
-            formats = (sf.get("formats") or []) + (sf.get("adaptiveFormats") or [])
-            with_url = [f for f in formats if f.get("url")]
-            if not with_url:
-                continue
-            details = data.get("videoDetails") or {}
-            video_streams, audio_streams, muxed = [], [], []
-            for f in with_url:
-                mime = f.get("mimeType") or ""
-                height = f.get("height") or 0
-                item = {
-                    "url": f["url"],
-                    "itag": f.get("itag"),
-                    "mimeType": mime,
-                    "quality": f.get("qualityLabel") or (f"{height}p" if height else None),
-                    "height": height,
-                    "bitrate": f.get("bitrate"),
-                    "codec": (mime.split("codecs=")[-1].strip('"') if "codecs=" in mime else None),
-                    "container": mime.split(";")[0].split("/")[-1] if mime else None,
-                    "has_audio": "audio" in mime,
-                    "has_video": "video" in mime,
-                    "cdn": "googlevideo",
-                }
-                if "video" in mime and "audio" in mime:
-                    muxed.append(item)
-                elif "video" in mime:
-                    video_streams.append(item)
-                elif "audio" in mime:
-                    audio_streams.append(item)
-            video_streams.sort(key=lambda x: x.get("height") or 0, reverse=True)
-            audio_streams.sort(key=lambda x: x.get("bitrate") or 0, reverse=True)
-            muxed.sort(key=lambda x: x.get("height") or 0, reverse=True)
-            best_a = audio_streams[0] if audio_streams else None
-            qualities = []
-            for mrow in muxed:
-                qualities.append({
-                    "label": mrow.get("quality") or f"{mrow.get('height')}p",
-                    "height": mrow.get("height"),
-                    "kind": "muxed",
-                    "url": mrow["url"],
-                    "video_url": mrow["url"],
-                    "audio_url": None,
-                    "has_audio": True,
-                    "play_mode": "single",
-                })
-            for v in video_streams:
-                if not best_a:
-                    break
-                qualities.append({
-                    "label": v.get("quality") or f"{v.get('height')}p",
-                    "height": v.get("height"),
-                    "kind": "paired",
-                    "url": None,
-                    "video_url": v["url"],
-                    "audio_url": best_a["url"],
-                    "has_audio": True,
-                    "play_mode": "dual",
-                })
-            qualities.sort(key=lambda x: x.get("height") or 0, reverse=True)
-            direct_video = (muxed[0]["url"] if muxed else None) or (
-                video_streams[0]["url"] if video_streams else None
-            )
-            direct_audio = best_a["url"] if best_a else None
-            thumbs = details.get("thumbnail", {}).get("thumbnails") or []
-            thumb = thumbs[-1]["url"] if thumbs else f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
-            return {
-                "videoId": vid,
-                "title": details.get("title") or "",
-                "description": (details.get("shortDescription") or "")[:2000],
-                "thumbnail": thumb,
-                "duration": int(details.get("lengthSeconds") or 0),
-                "uploader": details.get("author") or "",
-                "uploaderId": details.get("channelId") or "",
-                "uploaderUrl": "",
-                "views": int(details.get("viewCount") or 0),
-                "likes": 0,
-                "uploadDate": "",
-                "liveNow": bool(details.get("isLive") or details.get("isLiveContent")),
-                "hls": sf.get("hlsManifestUrl"),
-                "dash": sf.get("dashManifestUrl"),
-                "videoStreams": video_streams,
-                "audioStreams": audio_streams,
-                "muxedStreams": muxed,
-                "qualities": qualities,
-                "default_quality": qualities[0] if qualities else None,
-                "direct_video": direct_video,
-                "direct_audio": direct_audio,
-                "direct_play": direct_video or direct_audio,
-                "mp4": direct_video,
-                "mp3_audio": direct_audio,
-                "provider": "innertube",
-                "instance": c["label"] + ("+visitor" if vis else ""),
-                "webpage_url": f"https://www.youtube.com/watch?v={vid}",
-            }
+        if not visitors:
+            visitors.append(None)
+
+        for gl in ("US", "BD", "IN"):
+            for vis in visitors:
+                data = await self._innertube_player(vid, vis, gl)
+                if not data:
+                    continue
+                parsed = self._parse_innertube(data, vid, f"ANDROID+{gl}")
+                if parsed:
+                    return parsed
+                # Extract visitor from failed response and retry once
+                v2 = (data.get("responseContext") or {}).get("visitorData")
+                status = (data.get("playabilityStatus") or {}).get("status")
+                if v2 and status == "LOGIN_REQUIRED":
+                    data2 = await self._innertube_player(vid, v2, gl)
+                    if data2:
+                        parsed = self._parse_innertube(data2, vid, f"ANDROID+{gl}+retry")
+                        if parsed:
+                            return parsed
         return None
 
     async def get_streams(self, video_id: str) -> dict:
